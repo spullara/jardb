@@ -2,6 +2,7 @@ package jardb;
 
 import com.foundationdb.Database;
 import com.foundationdb.FDB;
+import com.foundationdb.Range;
 import com.foundationdb.Transaction;
 import com.foundationdb.async.Function;
 import com.foundationdb.async.Future;
@@ -39,6 +40,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.jar.JarFile;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import static java.util.Arrays.asList;
 import static java.util.stream.Collectors.toList;
@@ -46,47 +49,127 @@ import static java.util.stream.Collectors.toMap;
 
 public class Indexer {
 
-  public static final byte[] EMPTY_BYTES = new byte[0];
-  public static final int PERMITS = 100;
+  private static final byte[] EMPTY_BYTES = new byte[0];
 
   @Argument
-  private static boolean skipJars = false;
+  private boolean skipJars = false;
 
-  @Argument(alias = "d", description = "Specify the directory to index", required = true)
-  private static File directory;
+  @Argument(alias = "d", description = "Specify the directory to index")
+  private File directory;
+
+  @Argument(alias = "g", description = "Group id")
+  private String groupId;
+
+  @Argument(alias = "a", description = "Artifact id")
+  private String artifactId;
+
+  @Argument(alias = "v", description = "Version")
+  private String version;
+
+  @Argument(alias = "f", description = "Class file name")
+  private String classFile;
+
+  @Argument(alias = "c", description = "Class name")
+  private String className;
+
+  @Argument(alias = "p", description = "Package name")
+  private String packageName;
+
+  private FDB fdb = FDB.selectAPIVersion(200);
+  private Database db = fdb.open();
+  private DirectoryLayer dl = DirectoryLayer.getDefault();
+  private DirectorySubspace jardb = dl.createOrOpen(db, asList("jardb")).get();
+  private Subspace metadata = jardb.get("metadata");
+  private DirectorySubspace artifacts = jardb.createOrOpen(db, asList("artifacts")).get();
+  private DirectorySubspace artifactsByGroupId = artifacts.createOrOpen(db, asList("group")).get();
+  private DirectorySubspace artifactsByArtifactId = artifacts.createOrOpen(db, asList("artifact")).get();
+  private DirectorySubspace artifactsByPackage = artifacts.createOrOpen(db, asList("package")).get();
+  private DirectorySubspace artifactsByClass = artifacts.createOrOpen(db, asList("class")).get();
+  private DirectorySubspace artifactsByDependencies = artifacts.createOrOpen(db, asList("dependencies")).get();
+  private DirectorySubspace dependenciesByArtifacts = artifacts.createOrOpen(db, asList("dependee")).get();
+  private DirectorySubspace classes = jardb.createOrOpen(db, asList("classes")).get();
+  private DirectorySubspace classesBySHA = classes.createOrOpen(db, asList("sha")).get();
+  private DirectorySubspace classesByClassname = classes.createOrOpen(db, asList("name")).get();
 
   public static void main(String[] args) throws IOException, NoSuchAlgorithmException, InterruptedException {
-    Args.parseOrExit(Indexer.class, args);
+    Indexer indexer = new Indexer();
+    Args.parseOrExit(indexer, args);
+    indexer.run();
+  }
+
+  private void run() throws IOException {
+    if (directory != null) {
+      index();
+    } else {
+      lookup();
+    }
+  }
+
+  public void lookup() {
+    if (className != null) {
+
+    } else if (classFile != null) {
+
+    } else if (packageName != null) {
+
+    } else if (groupId != null) {
+      List<Artifact> artifacts = db.run(new Function<Transaction, List<Artifact>>() {
+        @Override
+        public List<Artifact> apply(Transaction tx) {
+          Subspace subspace = artifactsByGroupId.get(groupId);
+          if (artifactId != null) {
+            subspace = subspace.get(artifactId);
+            if (version != null) {
+              subspace = subspace.get(version);
+            }
+          }
+          return StreamSupport.stream(tx.getRange(Range.startsWith(subspace.pack())).spliterator(), false)
+                  .map(kv -> {
+                    Tuple key = artifactsByGroupId.unpack(kv.getKey());
+                    return new Artifact(key.getString(0), key.getString(1), key.getString(2));
+                  })
+                  .filter(a -> a.get(0).equals(groupId) &&
+                          (artifactId == null || a.get(1).equals(artifactId)) &&
+                          (version == null || a.get(2).equals(version)))
+                  .collect(Collectors.toList());
+        }
+      });
+      for (Artifact artifact : artifacts) {
+        System.out.println(artifact.get(0) + ", " + artifact.get(1) + ", " + artifact.get(2));
+      }
+    } else if (artifactId != null) {
+      List<Artifact> artifacts = db.run(new Function<Transaction, List<Artifact>>() {
+        @Override
+        public List<Artifact> apply(Transaction tx) {
+          Subspace subspace = artifactsByArtifactId.get(artifactId);
+          if (version != null) {
+            subspace = subspace.get(version);
+          }
+          return StreamSupport.stream(tx.getRange(Range.startsWith(subspace.pack())).spliterator(), false)
+                  .map(kv -> {
+                    Tuple key = artifactsByArtifactId.unpack(kv.getKey());
+                    return new Artifact(key.getString(0), key.getString(1), key.getString(2));
+                  })
+                  .filter(a -> (groupId == null || a.get(1).equals(groupId)) &&
+                          (artifactId == null || a.get(0).equals(artifactId)) &&
+                          (version == null || a.get(2).equals(version)))
+                  .collect(Collectors.toList());
+        }
+      });
+      for (Artifact artifact : artifacts) {
+        System.out.println(artifact.get(0) + ", " + artifact.get(1) + ", " + artifact.get(2));
+      }
+    }
+  }
+
+  public void index() throws IOException {
     if (!directory.exists()) {
       System.err.println("Directory " + directory + " doesn't exist");
       System.exit(1);
     }
-    FDB fdb = FDB.selectAPIVersion(200);
-    Database db = fdb.open();
-    DirectoryLayer dl = DirectoryLayer.getDefault();
-    DirectorySubspace jardb = dl.createOrOpen(db, asList("jardb")).get();
-    Subspace metadata = jardb.get("metadata");
-    DirectorySubspace artifacts = jardb.createOrOpen(db, asList("artifacts")).get();
-    DirectorySubspace artifactsByGroupId = artifacts.createOrOpen(db, asList("group")).get();
-    DirectorySubspace artifactsByArtifactId = artifacts.createOrOpen(db, asList("artifact")).get();
-    DirectorySubspace artifactsByPackage = artifacts.createOrOpen(db, asList("package")).get();
-    DirectorySubspace artifactsByClass = artifacts.createOrOpen(db, asList("class")).get();
-    DirectorySubspace artifactsByDependencies = artifacts.createOrOpen(db, asList("dependencies")).get();
-    DirectorySubspace dependenciesByArtifacts = artifacts.createOrOpen(db, asList("dependee")).get();
-    DirectorySubspace classes = jardb.createOrOpen(db, asList("classes")).get();
-    DirectorySubspace classesBySHA = classes.createOrOpen(db, asList("sha")).get();
-    DirectorySubspace classesByClassname = classes.createOrOpen(db, asList("name")).get();
     LongAdder count = new LongAdder();
     LongAdder error = new LongAdder();
     LongAdder sets = new LongAdder();
-    class Artifact extends ArrayList {
-      Artifact(String groupId, String artifactId, String version) {
-        super(3);
-        add(groupId);
-        add(artifactId);
-        add(version);
-      }
-    }
 
     byte[] currentIdLocation = metadata.get("currentId").pack();
 
@@ -158,54 +241,13 @@ public class Indexer {
               }
             });
             if (!skipJars) {
-              MessageDigest md = MessageDigest.getInstance("SHA1");
-              JarFile jarFile = new JarFile(file);
-              class Extract {
-                byte[] digest;
-                String filename;
-                String name;
-                public String pkg;
-              }
-              List<Extract> extracts = jarFile.stream()
-                      .filter(jf -> !jf.isDirectory() && jf.getName().endsWith(".class") && !jf.getName().contains("$"))
-                      .map(jf -> {
-                        Extract extract = new Extract();
-                        try {
-                          byte[] bytes = new byte[8192];
-                          InputStream inputStream = jarFile.getInputStream(jf);
-                          int len;
-                          while ((len = inputStream.read(bytes)) != -1) {
-                            md.update(bytes, 0, len);
-                          }
-                          inputStream.close();
-                          extract.digest = md.digest();
-                          String filename = jf.getName();
-                          extract.filename = filename;
-                          int lastSlash = filename.lastIndexOf("/");
-                          if (lastSlash != -1) {
-                            String leafFilename = filename.substring(lastSlash + 1);
-                            extract.name = leafFilename.substring(0, leafFilename.length() - 6);
-                            extract.pkg = filename.substring(0, lastSlash).replace('/', '.');
-                          } else {
-                            extract.pkg = "";
-                            extract.name = filename.substring(0, filename.length() - 6);
-                          }
-                        } catch (IOException e) {
-                          error.increment();
-                        }
-                        return extract;
-                      }).collect(toList());
-              db.run(new Function<Transaction, Object>() {
-                @Override
-                public Object apply(Transaction transaction) {
-                  return transaction.get(EMPTY_BYTES).get();
-                }
-              });
+              List<Extract> extracts = extractJar(file, error);
+              flowControl(db);
               db.runAsync(new Function<Transaction, Future<Void>>() {
                 @Override
                 public Future<Void> apply(Transaction tx) {
-                  tx.set(artifactsByGroupId.get(abbrev).pack(), EMPTY_BYTES);
-                  tx.set(artifactsByArtifactId.get(abbrev).pack(), EMPTY_BYTES);
+                  tx.set(artifactsByGroupId.get(groupId).get(artifactId).get(version).pack(), EMPTY_BYTES);
+                  tx.set(artifactsByArtifactId.get(artifactId).get(groupId).get(version).pack(), EMPTY_BYTES);
                   count.increment();
                   sets.add(2);
                   return ReadyFuture.DONE;
@@ -245,6 +287,49 @@ public class Indexer {
     System.out.println("Sets " + sets);
   }
 
+  private static void flowControl(Database db) {
+    db.run(new Function<Transaction, Object>() {
+      @Override
+      public Object apply(Transaction transaction) {
+        return transaction.get(EMPTY_BYTES).get();
+      }
+    });
+  }
+
+  private static List<Extract> extractJar(File file, LongAdder error) throws IOException, NoSuchAlgorithmException {
+    JarFile jarFile = new JarFile(file);
+    MessageDigest md = MessageDigest.getInstance("SHA1");
+    return jarFile.stream()
+            .filter(jf -> !jf.isDirectory() && jf.getName().endsWith(".class") && !jf.getName().contains("$"))
+            .map(jf -> {
+              Extract extract = new Extract();
+              try {
+                byte[] bytes = new byte[8192];
+                InputStream inputStream = jarFile.getInputStream(jf);
+                int len;
+                while ((len = inputStream.read(bytes)) != -1) {
+                  md.update(bytes, 0, len);
+                }
+                inputStream.close();
+                extract.digest = md.digest();
+                String filename = jf.getName();
+                extract.filename = filename;
+                int lastSlash = filename.lastIndexOf("/");
+                if (lastSlash != -1) {
+                  String leafFilename = filename.substring(lastSlash + 1);
+                  extract.name = leafFilename.substring(0, leafFilename.length() - 6);
+                  extract.pkg = filename.substring(0, lastSlash).replace('/', '.');
+                } else {
+                  extract.pkg = "";
+                  extract.name = filename.substring(0, filename.length() - 6);
+                }
+              } catch (IOException e) {
+                error.increment();
+              }
+              return extract;
+            }).collect(toList());
+  }
+
   private static String group(Model model) {
     String groupId = model.getGroupId();
     if (groupId == null) {
@@ -272,5 +357,21 @@ public class Indexer {
       }
     }
     return version;
+  }
+}
+
+class Extract {
+  byte[] digest;
+  String filename;
+  String name;
+  public String pkg;
+}
+
+class Artifact extends ArrayList {
+  Artifact(String groupId, String artifactId, String version) {
+    super(3);
+    add(groupId);
+    add(artifactId);
+    add(version);
   }
 }
